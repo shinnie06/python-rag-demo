@@ -15,7 +15,7 @@ Fully **local** — no API keys, no cloud, no cost after setup.
 5. [Step 1: Chunking — Splitting Documents Intelligently](#5-step-1-chunking--splitting-documents-intelligently)
 6. [Step 2: Embedding — Turning Text into Numbers](#6-step-2-embedding--turning-text-into-numbers)
 7. [Step 3: Indexing — Two Indices, Two Strengths](#7-step-3-indexing--two-indices-two-strengths)
-8. [Step 4: Query Rewriting — Making Queries Retrieval-Friendly](#8-step-4-query-rewriting--making-queries-retrieval-friendly)
+8. [Step 4: Query Rewriting + Multi-Query Expansion](#8-step-4-query-rewriting--multi-query-expansion)
 9. [Step 5: Hybrid Retrieval — BM25 + Vector Search](#9-step-5-hybrid-retrieval--bm25--vector-search)
 10. [Step 6: Reciprocal Rank Fusion — Merging Two Result Lists](#10-step-6-reciprocal-rank-fusion--merging-two-result-lists)
 11. [Step 7: CrossEncoder Reranking — The Quality Gate](#11-step-7-crossencoder-reranking--the-quality-gate)
@@ -151,8 +151,8 @@ The full pipeline from user question to grounded answer:
 ║  User Query                                                          ║
 ║      │                                                               ║
 ║      ▼                                                               ║
-║  [1] Query Rewriting ──── LLM converts conversational query         ║
-║      │                    into a retrieval-optimised form            ║
+║  [1] Query Rewriting ──── LLM rewrites query; expands into 3        ║
+║      │                    variants searched independently            ║
 ║      ▼                                                               ║
 ║  [2] BM25 Search ──────── Exact keyword matching (top 10)           ║
 ║  [3] Vector Search ─────── Semantic similarity search (top 10)      ║
@@ -424,7 +424,7 @@ Without this, "Spider-Man" would become `["spider", "man"]` — losing the compo
 
 ---
 
-## 8. Step 4: Query Rewriting — Making Queries Retrieval-Friendly
+## 8. Step 4: Query Rewriting + Multi-Query Expansion
 
 ### The Problem
 
@@ -435,37 +435,64 @@ User types:       "Who's that guy with the hammer again?"
 Good for search:  "Thor Odinson hammer Mjolnir MCU character"
 ```
 
-Vector and BM25 search both work better with explicit, noun-heavy queries. Conversational queries with vague pronouns ("that guy", "the thing") under-perform.
+Vector and BM25 search both work better with explicit, noun-heavy queries. A second, subtler problem: a single rewrite that goes wrong (e.g. hallucinating a wrong year or dropping a subtitle) poisons the entire retrieval pipeline — there is no fallback.
 
-### The Solution: LLM-Powered Query Rewriting
+### Step A: Hallucination-Resistant Primary Rewrite
 
-Before retrieval, the pipeline sends the user's query to the LLM with a short prompt:
+The pipeline rewrites the query using strict rules that prevent the LLM from inventing facts:
 
-```python
-# prompts.py: QUERY_REWRITE_TEMPLATE
-"""You are a search query optimiser for an MCU knowledge base.
-Rewrite the following question as a short, keyword-rich search query.
-Focus on specific MCU character names, film titles, events, or concepts.
-Output ONLY the rewritten query — no explanation, no punctuation, just the query.
-
-Original question: {query}
-Rewritten query:"""
+```
+STRICT RULES — violating these ruins retrieval:
+1. PRESERVE all proper nouns EXACTLY: movie titles (including subtitles),
+   character names, actor names. Do NOT add years/dates not stated by the user.
+2. DO NOT invent facts not in the original query.
+3. You may expand vague pronouns or abbreviations using MCU terminology.
+4. Add retrieval-useful terms only when clearly implied.
+5. Output ONE line — the rewritten query only.
 ```
 
-**Examples of what rewriting does:**
+Few-shot examples steer the model toward the correct behaviour:
 
-| Original Query | Rewritten Query |
-|---------------|-----------------|
-| "Who's the one with the hammer?" | "Thor Mjolnir hammer Asgard MCU" |
-| "What happened after everyone came back?" | "Avengers Endgame Time Heist Blip reversal aftermath" |
-| "Tell me about the big purple guy" | "Thanos Infinity Gauntlet villain MCU Snap" |
-| "What's the new Avengers film about?" | "Avengers Doomsday Doctor Doom 2026 MCU Phase 6" |
+| Original | Rewritten |
+|---|---|
+| "Who's the spider guy and what can he do?" | "Who is Spider-Man Peter Parker MCU powers abilities" |
+| "What did RDJ do in Endgame?" | "What did Robert Downey Jr Tony Stark do in Avengers: Endgame?" |
+| "Post credit scene in 'The Fantastic Four: First Steps'?" | "post-credits scene The Fantastic Four: First Steps MCU Phase 6 implications" |
 
-**Safety checks:** The rewritten query must be between 5 and 500 characters. If the LLM produces something too short or too long (a hallucination), the pipeline falls back to the original query silently.
+**Safety checks:**
+- Length bounds: rewrite must be 5–500 characters, else fall back to original
+- **Quoted-phrase guard**: if the user quoted a title (e.g. `'The Fantastic Four: First Steps'`) and key words from that phrase do not appear in the rewrite, the pipeline falls back to the original query — preventing dropped subtitles or paraphrased entity names
+- Temperature raised from 0.0 → 0.3 to reduce over-committed wrong paraphrases
 
-### Why Not Always Use the Rewritten Query for the Answer?
+### Step B: Multi-Query Expansion
 
-The rewritten query is only used for **retrieval** — finding relevant chunks. The original user query is used for **generation** — the LLM still sees what the user actually asked. This ensures the final answer addresses the question as the user phrased it.
+A single rewrite, even a good one, can still miss relevant chunks. The pipeline generates **2 additional query variants** that retrieve from different angles:
+
+```
+Variant 1 (keyword-dense):   strips conversational words, maximises BM25 recall
+Variant 2 (semantic paraphrase): different phrasing of same intent, better for vector search
+```
+
+All 3 queries — primary rewrite + 2 variants — run the **full hybrid pipeline independently** (BM25 → Vector → RRF → CrossEncoder). The resulting chunk pools are merged and deduplicated before final CrossEncoder reranking. This means the system can recover from a single bad rewrite via the other variants.
+
+```
+Original query
+    │
+    ▼
+Primary rewrite ──── hybrid_retrieve() ─── chunks A
+    │
+    ├── Variant 1 (keyword-dense) ──────── hybrid_retrieve() ─── chunks B
+    │
+    └── Variant 2 (semantic paraphrase) ── hybrid_retrieve() ─── chunks C
+                                                                      │
+                                                         merge + dedup + re-sort
+                                                                      │
+                                                            CrossEncoder final top-K
+```
+
+### Why Not Use the Rewritten Query for the Answer?
+
+The rewritten queries are only used for **retrieval** — finding relevant chunks. The original user query is used for **generation** — the LLM still sees what the user actually asked, ensuring the final answer addresses the question as phrased.
 
 ---
 
@@ -782,7 +809,7 @@ The educational deep-dive page. Run any query and see the entire pipeline live:
 | Step | What you see |
 |------|-------------|
 | **Chunking Explainer** | Side-by-side: SentenceSplitter output vs MarkdownNodeParser output for the same article |
-| **Step 1: Query Rewriting** | Original vs rewritten query; the actual prompt template used; before/after examples |
+| **Step 1: Query Rewriting** | Original → primary rewrite → 2 multi-query variants; prompts shown; all 3 queries hit the vector DB independently |
 | **Step 2: Retrieval Comparison** | BM25 results / Vector results / Hybrid side by side; 🔗 marks chunks that appeared in both lists |
 | **Step 3: CrossEncoder Reranking** | Bar chart of all merged candidates scored by CrossEncoder; Before vs After position changes with 🔼🔽 arrows |
 | **Step 4: Final Answer** | Generated answer with sources |
