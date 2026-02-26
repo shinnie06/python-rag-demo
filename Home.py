@@ -75,7 +75,7 @@ st.markdown("This app demonstrates **Advanced RAG** — every step is visible in
 
 pipeline_cols = st.columns(7)
 steps = [
-    ("1", "Query\nRewriting", "LLM rewrites your query for better retrieval"),
+    ("1", "Query\nRewriting", "LLM rewrites + expands into 3 queries for broader retrieval"),
     ("2", "BM25\nSearch", "Keyword-based search over all chunks"),
     ("3", "Vector\nSearch", "Semantic similarity search via embeddings"),
     ("4", "RRF\nFusion", "Reciprocal Rank Fusion merges both result lists"),
@@ -128,7 +128,8 @@ with nav_cols[1]:
     - **Embeddings**: `nomic-embed-text` (8K context, fast)
     - **Vector Store**: ChromaDB (persistent, local)
     - **RAG Framework**: LlamaIndex
-    - **Hybrid Search**: BM25 + Vector + CrossEncoder
+    - **Hybrid Search**: BM25 + Vector + RRF + CrossEncoder
+    - **Multi-Query Expansion**: 3 query variants searched independently, results merged
     - **Evaluation**: LLM-as-judge + cosine similarity
     - **UI**: Streamlit
     - **Package manager**: uv

@@ -74,7 +74,18 @@ def build_filter() -> dict | None:
 def _render_trace(trace: dict, rewritten_query: str) -> None:
     with st.expander("🔍 RAG Trace — click to inspect the pipeline"):
         if rewritten_query:
-            st.markdown(f"**Rewritten query:** `{rewritten_query}`")
+            queries = [q.strip() for q in rewritten_query.split("\n") if q.strip()]
+            if len(queries) > 1:
+                st.markdown("**Searched vector DB with:**")
+                st.markdown(f"- **Primary:** `{queries[0]}`")
+                for i, v in enumerate(queries[1:], 1):
+                    st.markdown(f"- **Variant {i}:** `{v}`")
+                st.caption(
+                    f"Each query ran the full hybrid pipeline independently. "
+                    f"Results from all {len(queries)} searches were merged before CrossEncoder reranking."
+                )
+            elif queries:
+                st.markdown(f"**Primary search query:** `{queries[0]}`")
 
         chunks = trace.get("reranked", [])
         if chunks:

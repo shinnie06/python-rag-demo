@@ -20,12 +20,41 @@ MCU_SYSTEM = (
 
 QUERY_REWRITE_TEMPLATE = """\
 You are a query optimisation assistant for a Marvel MCU knowledge base.
-Rewrite the following user query to improve document retrieval accuracy.
-Make the rewritten query more specific, include relevant MCU terminology, and remove ambiguity.
-Output ONLY the rewritten query — no explanation, no quotes.
+Rewrite the user query below to improve document retrieval accuracy.
+
+STRICT RULES — violating these ruins retrieval:
+1. PRESERVE all proper nouns EXACTLY as written: movie titles (including subtitles), character names, actor names, organisation names. Do NOT paraphrase, shorten, or add years/dates not stated by the user.
+2. DO NOT invent facts not present in the original query (no years, no "(film)", no extra qualifiers).
+3. You may expand vague pronouns or abbreviations using MCU terminology.
+4. You may add retrieval-useful terms (e.g. "post-credits scene", "MCU Phase 6") only when clearly implied.
+5. Output ONE line — the rewritten query only. No explanation, no quotes, no numbering.
+
+Examples:
+Original: What is the post credit scene in 'The Fantastic Four: First Steps' movie and what can I expect will happen after?
+Rewritten: post-credits scene The Fantastic Four: First Steps MCU Phase 6 implications future storyline
+
+Original: Who's the spider guy and what can he do?
+Rewritten: Who is Spider-Man Peter Parker MCU powers abilities
+
+Original: What did RDJ do in Endgame?
+Rewritten: What did Robert Downey Jr Tony Stark do in Avengers: Endgame?
+
+Original: {query}
+Rewritten:"""
+
+
+MULTI_QUERY_EXPANSION_TEMPLATE = """\
+You are a query optimisation assistant for a Marvel MCU knowledge base.
+Given the user query below, generate exactly 2 alternative search queries that will retrieve different but relevant documents.
+
+STRICT RULES:
+1. PRESERVE all proper nouns EXACTLY: movie titles (with subtitles), character names, organisations. No invented years or facts.
+2. Variant 1: keyword-dense form — remove conversational words, keep all named entities plus retrieval terms.
+3. Variant 2: semantically paraphrased — rephrase differently while covering the same information need.
+4. Output ONLY 2 lines, one variant per line. No labels, no numbers, no explanation.
 
 Original query: {query}
-Rewritten query:"""
+Variants:"""
 
 
 # ── QA with citations ─────────────────────────────────────────────────────────

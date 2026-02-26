@@ -136,7 +136,10 @@ if st.session_state.char_profile:
     if st.session_state.char_rewritten:
         with st.expander("Query rewriting trace"):
             st.markdown(f"**Original:** Tell me about {st.session_state.last_character}")
-            st.markdown(f"**Rewritten:** {st.session_state.char_rewritten}")
+            queries = [q.strip() for q in st.session_state.char_rewritten.split("\n") if q.strip()]
+            st.markdown(f"**Primary search query:** {queries[0]}")
+            for i, v in enumerate(queries[1:], 1):
+                st.markdown(f"**Variant {i}:** {v}")
 else:
     # Placeholder cards for popular characters
     st.divider()

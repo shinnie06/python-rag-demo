@@ -101,8 +101,10 @@ if st.session_state.tl_answer:
     st.divider()
 
     # Rewrite trace
-    if st.session_state.tl_rewrite and st.session_state.tl_rewrite != st.session_state.tl_query:
-        st.caption(f"Query rewritten to: *{st.session_state.tl_rewrite}*")
+    tl_queries = [q.strip() for q in st.session_state.tl_rewrite.split("\n") if q.strip()]
+    if tl_queries and tl_queries[0] != st.session_state.tl_query:
+        suffix = f" (+{len(tl_queries)-1} variant{'s' if len(tl_queries)-1 != 1 else ''})" if len(tl_queries) > 1 else ""
+        st.caption(f"Primary search query: *{tl_queries[0]}*{suffix}")
 
     # Evaluation scores
     if show_eval and st.session_state.tl_scores:
@@ -134,7 +136,10 @@ if st.session_state.tl_answer:
             trace = st.session_state.tl_trace
 
             if st.session_state.tl_rewrite:
-                st.markdown(f"**Rewritten query:** `{st.session_state.tl_rewrite}`")
+                tl_qs = [q.strip() for q in st.session_state.tl_rewrite.split("\n") if q.strip()]
+                st.markdown(f"**Primary search query:** `{tl_qs[0]}`")
+                for i, v in enumerate(tl_qs[1:], 1):
+                    st.markdown(f"**Variant {i}:** `{v}`")
 
             col_bm25, col_vec = st.columns(2)
             with col_bm25:

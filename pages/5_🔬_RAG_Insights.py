@@ -10,7 +10,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from mcu_rag.evaluation.scorer import chunk_relevancy_score, faithfulness_score
-from mcu_rag.generation.pipeline import get_pipeline, rewrite_query
+from mcu_rag.generation.pipeline import expand_queries, get_pipeline, rewrite_query
 from mcu_rag.generation.prompts import format_context
 from mcu_rag.retrieval.hybrid import bm25_only_retrieve, hybrid_retrieve, vector_only_retrieve
 
@@ -91,28 +91,46 @@ if run_btn and query.strip():
         "and remove ambiguity. This improves what gets retrieved."
     )
 
-    with st.expander("How does query rewriting work? (show prompt)"):
+    with st.expander("How does query rewriting work? (show prompts)"):
         st.markdown("**Why rewrite?** Conversational queries are vague. Retrieval works best with specific, dense terminology.")
-        st.markdown("**Prompt sent to the LLM:**")
+        st.markdown("**Step A — Primary rewrite prompt (sent to LLM):**")
         st.code(
-            "You are a query optimisation assistant for a Marvel MCU knowledge base.\n"
-            "Rewrite the following user query to improve document retrieval accuracy.\n"
-            "Make the rewritten query more specific, include relevant MCU terminology,\n"
-            "and remove ambiguity.\n"
-            "Output ONLY the rewritten query — no explanation, no quotes.\n\n"
-            "Original query: {your query}\n"
-            "Rewritten query:",
+            "STRICT RULES — violating these ruins retrieval:\n"
+            "1. PRESERVE all proper nouns EXACTLY: movie titles (incl. subtitles), character names, actor names.\n"
+            "   Do NOT paraphrase, shorten, or add years/dates not stated by the user.\n"
+            "2. DO NOT invent facts (no years, no '(film)', no extra qualifiers).\n"
+            "3. You may expand vague pronouns or abbreviations using MCU terminology.\n"
+            "4. Add retrieval-useful terms (e.g. 'post-credits scene') only when clearly implied.\n"
+            "5. Output ONE line — the rewritten query only.\n\n"
+            "Original: {your query}\n"
+            "Rewritten:",
+            language=None,
+        )
+        st.markdown("**Step B — Multi-query expansion prompt (generates 2 variants):**")
+        st.code(
+            "Generate exactly 2 alternative search queries:\n"
+            "  Variant 1: keyword-dense — remove conversational words, keep all entities\n"
+            "  Variant 2: semantically paraphrased — rephrase differently, same intent\n\n"
+            "Same preservation rules apply — no invented facts, exact proper nouns.\n"
+            "Output ONLY 2 lines, one variant per line.",
             language=None,
         )
         st.markdown("""
-**Examples of what changes:**
+**Each of the 3 resulting queries independently searches the vector DB:**
 
-| Original query | Rewritten for retrieval |
+| Query | Purpose |
 |---|---|
-| "What did the bad guy do?" | "What were Thanos's actions and motivations in Avengers: Infinity War?" |
-| "Who's the spider guy?" | "Who is Spider-Man / Peter Parker in the MCU and what are his powers?" |
-| "RDJ coming back?" | "Is Robert Downey Jr. returning to the MCU and in what role?" |
+| Primary rewrite | Precise retrieval with correct MCU terminology |
+| Variant 1 (keyword-dense) | Maximises BM25 keyword recall |
+| Variant 2 (semantic paraphrase) | Wider vector search coverage |
+
+All 3 chunk pools are merged and deduplicated, then CrossEncoder reranks the combined set.
 """)
+
+    with st.spinner("Rewriting query..."):
+        rewritten = rewrite_query(q)
+    with st.spinner("Generating query variants..."):
+        variants = expand_queries(rewritten)
 
     col_orig, col_arrow, col_rewrite = st.columns([2, 0.3, 2])
     with col_orig:
@@ -121,20 +139,34 @@ if run_btn and query.strip():
     with col_arrow:
         st.markdown("<div style='text-align:center; font-size:2em; padding-top:1.5em'>→</div>", unsafe_allow_html=True)
     with col_rewrite:
-        with st.spinner("Rewriting query..."):
-            rewritten = rewrite_query(q)
-        st.markdown("**Rewritten for retrieval**")
+        st.markdown("**Primary search query**")
         st.success(rewritten)
         if rewritten == q:
             st.caption("No change — query was already retrieval-ready.")
         else:
-            st.caption("This rewritten version will retrieve more targeted chunks from the knowledge base.")
+            st.caption("Proper nouns preserved exactly. Retrieval-useful terms added.")
+
+    if variants:
+        st.markdown("**Also searched the vector DB with (multi-query expansion):**")
+        labels = ["Keyword-dense", "Semantic paraphrase"]
+        for i, v in enumerate(variants):
+            label = labels[i] if i < len(labels) else f"Variant {i+1}"
+            st.info(f"**Variant {i+1} — {label}:** {v}")
+        st.caption(
+            f"Each of the {1 + len(variants)} queries ran the full hybrid pipeline independently "
+            f"(BM25 + Vector + RRF + CrossEncoder). Results were merged and deduplicated before final reranking."
+        )
+    else:
+        st.caption("Multi-query expansion disabled or returned no variants — single-query retrieval used.")
 
     st.divider()
 
     # ── Step 2: Retrieval comparison ──────────────────────────────────────
     st.markdown("## Step 2 — Retrieval Comparison")
-    st.caption("Three methods run in parallel on the rewritten query. The Hybrid column is what actually goes to the LLM.")
+    st.caption(
+        "Three methods shown here for the **primary rewrite** only — for educational comparison. "
+        "In practice, the same pipeline runs for all query variants and the chunk pools are merged."
+    )
 
     exp1, exp2, exp3 = st.columns(3)
     with exp1:
@@ -420,10 +452,11 @@ CrossEncoder — that's the reranker correcting false positives.
 
     # ── Pipeline Summary ───────────────────────────────────────────────────
     st.markdown("## Pipeline Summary")
+    query_summary = rewritten if not variants else f"{rewritten}  (+{len(variants)} variants → {1 + len(variants)} total searches)"
     summary_data = {
         "Step":   ["1. Query Rewriting", "2. BM25 Results", "3. Vector Results", "4. After RRF Merge", "5. After CrossEncoder", "6. Chunk Relevancy", "7. Faithfulness"],
         "Result": [
-            rewritten,
+            query_summary,
             f"{len(bm25_results)} chunks",
             f"{len(vector_results)} chunks",
             f"{trace.get('merged_count', '?')} candidates",

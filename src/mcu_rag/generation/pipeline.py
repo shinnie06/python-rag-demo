@@ -6,10 +6,14 @@ from __future__ import annotations
 
 from typing import Any, Generator
 
+import re
+
+from mcu_rag.config import MULTI_QUERY_ENABLED, MULTI_QUERY_VARIANTS, RERANK_TOP_K
 from mcu_rag.generation.llm import generate, stream_generate
 from mcu_rag.generation.prompts import (
     CHARACTER_PROFILE_TEMPLATE,
     MCU_SYSTEM,
+    MULTI_QUERY_EXPANSION_TEMPLATE,
     NO_RAG_TEMPLATE,
     QA_TEMPLATE,
     QUERY_REWRITE_TEMPLATE,
@@ -25,17 +29,66 @@ from mcu_rag.retrieval.hybrid import hybrid_retrieve
 def rewrite_query(query: str) -> str:
     """
     Use the LLM to rewrite the user query for better document retrieval.
-    Falls back to the original query if rewriting fails.
+    Enforces preservation of quoted proper nouns (movie titles, character names).
+    Falls back to the original query if rewriting fails or drops key entities.
     """
     try:
         prompt = QUERY_REWRITE_TEMPLATE.format(query=query)
-        rewritten = generate(prompt, temperature=0.0).strip()
-        # Sanity check: if the model returns something useless, fall back
+        rewritten = generate(prompt, temperature=0.3).strip()
         if len(rewritten) < 5 or len(rewritten) > 500:
             return query
+        # If the user quoted a title or name, verify its key words survived
+        quoted = re.findall(r"['\"]([^'\"]+)['\"]", query)
+        for phrase in quoted:
+            words = [w for w in phrase.split() if len(w) > 3]
+            if words and not any(w.lower() in rewritten.lower() for w in words):
+                return query  # entity dropped — fall back to original
         return rewritten
     except Exception:
         return query
+
+
+def expand_queries(query: str) -> list[str]:
+    """
+    Generate alternative query variants for multi-query retrieval.
+    Returns up to MULTI_QUERY_VARIANTS strings, or [] on failure.
+    """
+    if not MULTI_QUERY_ENABLED:
+        return []
+    try:
+        prompt = MULTI_QUERY_EXPANSION_TEMPLATE.format(query=query)
+        raw = generate(prompt, temperature=0.5).strip()
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        variants = [l for l in lines if 10 <= len(l) <= 400]
+        return variants[:MULTI_QUERY_VARIANTS]
+    except Exception:
+        return []
+
+
+def _multi_query_retrieve(
+    primary: str,
+    variants: list[str],
+    where_filter: dict | None,
+) -> tuple[list[dict], dict]:
+    """
+    Run hybrid_retrieve for primary + each variant, merge by dedup key.
+    Returns merged chunk list (capped at RERANK_TOP_K) and primary trace.
+    """
+    all_chunks, primary_trace = hybrid_retrieve(primary, where_filter=where_filter)
+    seen: dict[str, dict] = {c["text"][:200]: c for c in all_chunks}
+    for variant in variants:
+        try:
+            v_chunks, _ = hybrid_retrieve(variant, where_filter=where_filter)
+            for chunk in v_chunks:
+                key = chunk["text"][:200]
+                if key not in seen:
+                    seen[key] = chunk
+                elif chunk.get("rerank_score", 0) > seen[key].get("rerank_score", 0):
+                    seen[key] = chunk
+        except Exception:
+            pass  # a failed variant does not poison the result
+    merged = sorted(seen.values(), key=lambda c: c.get("rerank_score", 0), reverse=True)
+    return merged[:RERANK_TOP_K], primary_trace
 
 
 # ── Full pipeline ─────────────────────────────────────────────────────────────
@@ -68,11 +121,13 @@ class RAGPipeline:
         # Step 2: Retrieve
         if mode == "no_rag":
             chunks, trace = [], {}
+            variants: list[str] = []
         else:
-            chunks, trace = hybrid_retrieve(
-                rewritten,
-                where_filter=metadata_filter,
-            )
+            variants = expand_queries(rewritten)
+            if variants:
+                chunks, trace = _multi_query_retrieve(rewritten, variants, metadata_filter)
+            else:
+                chunks, trace = hybrid_retrieve(rewritten, where_filter=metadata_filter)
 
         # Step 3: Build context + prompt
         context = format_context(chunks) if chunks else ""
@@ -89,9 +144,10 @@ class RAGPipeline:
         system = MCU_SYSTEM if mode != "no_rag" else ""
         answer = generate(prompt, system=system)
 
+        all_queries = [rewritten] + variants
         return {
             "answer":          answer,
-            "rewritten_query": rewritten,
+            "rewritten_query": "\n".join(all_queries),
             "chunks":          chunks,
             "trace":           trace,
             "context":         context,
@@ -114,8 +170,13 @@ class RAGPipeline:
         rewritten = rewrite_query(query) if mode != "no_rag" else query
         if mode == "no_rag":
             chunks, trace = [], {}
+            variants: list[str] = []
         else:
-            chunks, trace = hybrid_retrieve(rewritten, where_filter=metadata_filter)
+            variants = expand_queries(rewritten)
+            if variants:
+                chunks, trace = _multi_query_retrieve(rewritten, variants, metadata_filter)
+            else:
+                chunks, trace = hybrid_retrieve(rewritten, where_filter=metadata_filter)
         context = format_context(chunks) if chunks else ""
 
         prompt = self._build_prompt(
@@ -126,8 +187,9 @@ class RAGPipeline:
         )
         system = MCU_SYSTEM
 
+        all_queries = [rewritten] + variants
         meta = {
-            "rewritten_query": rewritten,
+            "rewritten_query": "\n".join(all_queries),
             "chunks":          chunks,
             "trace":           trace,
         }

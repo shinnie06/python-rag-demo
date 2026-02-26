@@ -36,6 +36,11 @@ RERANK_TOP_K    = 5   # final chunks passed to LLM after CrossEncoder
 # ── CrossEncoder model (downloads automatically on first run) ─────────────────
 CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
+# ── Query rewriting ───────────────────────────────────────────────────────────
+QUERY_REWRITE_ENABLED = True   # set False to skip rewriting entirely (debug)
+MULTI_QUERY_ENABLED   = True   # set False to use single-query retrieval only
+MULTI_QUERY_VARIANTS  = 2      # number of extra query variants to generate
+
 # ── Wikipedia scraping targets ────────────────────────────────────────────────
 WIKI_CHARACTERS = [
     "Iron Man", "Captain America", "Thor", "Hulk", "Black Widow",
